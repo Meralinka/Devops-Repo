@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  The Phonebook Application aims to create a phonebook application in Python and deployed as a web application with Flask on AWS Application Load Balancer with Auto Scaling Group of Elastic Compute Cloud (EC2) Instances and Relational Database Service (RDS) using AWS Cloudformation Service.
+Parameters:
+  myVPC:
+    Description: select your vpc 
+    Type: AWS::EC2::VPC::Id
+
+  mySubnet:
+    Description: select at least 2 subnet
+    Type: List<AWS::EC2::Subnet::Id>
+
+  InsType:
+    Description: Select instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+
+  myKeyPair:
+    Description: Select your KEYPAIR
+    Type: AWS::EC2::KeyPair::KeyName
+       
+
+  
+Mappings:
+  RegionImageMap:
+    us-east-1:
+      AMI: ami-0dc2d3e4c0f9ebd18
+    us-east-2:
+      AMI: ami-0233c2d874b811deb
+    us-west-1:
+      AMI: ami-0ed05376b59b90e46
+    us-west-2:
+      AMI: ami-0dc8f589abe99f538
+    eu-west-1:
+      AMI: ami-058b1b7fe545997ae 
+
+
+
+
+  
+Resources:
+  LBSecGrp: #alb security group
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: enable http for ALB # Required
+      SecurityGroupIngress:
+        - IpProtocol: tcp 
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref myVPC
+      Tags:
+        - Key: Name
+          Value: LBSecGrp
+
+  EC2SecGrp: # ec2 security group
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: enable http and ssh    # Required
+      SecurityGroupIngress:
+        - IpProtocol: tcp 
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          
+        - IpProtocol: tcp 
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Ec2SecGrp
+      VpcId: !Ref myVPC
+
+  RDSSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: enable MySql port for ec2 # Required
+      SecurityGroupIngress:
+        - IpProtocol: tcp 
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: RDSsecGrp
+      VpcId: !Ref myVPC
+
+
+  myTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref myVPC
+      UnhealthyThresholdCount: 2
+
+
+  myLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SecurityGroups:
+        - !GetAtt LBSecGrp.GroupId
+      Subnets: !Ref mySubnet
+      Type: application
+
+
+  listenerProje:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: # Required
+        - Type: forward
+          TargetGroupArn: !Ref myTG
+      LoadBalancerArn: !Ref myLB # Required
+      Port: 80
+      Protocol: HTTP
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: !GetAZs 
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 90
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref myLT
+        Version: !GetAtt myLT.LatestVersionNumber
+      MaxSize: 3 # Required
+      MinSize: 1 # Required
+      TargetGroupARNs: 
+        - !Ref myTG
+
+  cpuPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup # Required
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60.0      
+
+  myLT:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap 
+          - RegionImageMap
+          - !Ref AWS::Region
+          - AMI
+        InstanceType: !Ref InsType
+        KeyName: !Ref myKeyPair
+        SecurityGroupIds:
+          - !GetAtt EC2SecGrp.GroupId
+        UserData: 
+          Fn::Base64:
+            !Sub
+          
+              - |
+                #! /bin/bash
+                yum update -y
+                yum install python3 -y
+                pip3 install flask
+                pip3 install flask-mysql
+                cd /home/ec2-user
+                echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
+                curl https://raw.githubusercontent.com/Meralinka/my-project/main/aws/Project-004-Phonebook-Application/phonebook-app.py -o phonebook-app.py
+                mkdir templates && cd templates
+                curl https://raw.githubusercontent.com/Meralinka/my-project/main/aws/Project-004-Phonebook-Application/templates/add-update.html -o add-update.html
+                curl https://raw.githubusercontent.com/Meralinka/my-project/main/aws/Project-004-Phonebook-Application/templates/delete.html -o delete.html
+                curl https://raw.githubusercontent.com/Meralinka/my-project/main/aws/Project-004-Phonebook-Application/templates/index.html -o index.html
+                cd ..
+                python3 phonebook-app.py
+              - MyDBURI: !GetAtt MyDB.Endpoint.Address
+
+
+  MyDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      DBInstanceClass: db.t2.micro # Required
+      DBInstanceIdentifier: phone-app
+      DeleteAutomatedBackups: true
+      Engine: mysql
+      EngineVersion: 8.0.19
+      MasterUserPassword: Pl123456789
+      MasterUsername: admin
+      VPCSecurityGroups:
+        - !GetAtt RDSSecGrp.GroupId
+  
+Outputs:
+  AppUrl:
+    Description: Url of the ELB
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt myLB.DNSName 
+
+  RDSEndPoint:
+    Description: 'The RDS Endpoint of MySQL DB'
+    Value: !GetAtt MyDB.Endpoint.Address
